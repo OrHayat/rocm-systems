@@ -103,6 +103,8 @@ BYTE_NIBBLE_CONVERSION_NAMES = {f'V_CVT_F32_UBYTE{byte}' for byte in range(4)} |
 
 BIT_PACK_NAMES = {'V_PACK_B32_F16', 'V_CVT_PK_U8_F32'}
 
+CUBE_NAMES = {'V_CUBEID_F32', 'V_CUBESC_F32', 'V_CUBETC_F32', 'V_CUBEMA_F32'}
+
 SELECTION_F64 = {
     'rdna3': {'V_MIN_F64', 'V_MAX_F64'},
     'rdna4': {'V_MIN_NUM_F64', 'V_MAX_NUM_F64', 'V_MINIMUM_F64', 'V_MAXIMUM_F64'},
@@ -234,6 +236,7 @@ FLOAT_NAMES = (
     | CONVERSION16_NAMES
     | CONVERSION32_NAMES
     | CONVERSION64_NAMES
+    | CUBE_NAMES
     | DOT2_F32_NAMES
     | DOT4_F32_NAMES
     | FMA_F16
@@ -251,7 +254,7 @@ FLOAT_NAMES = (
     | UNARY_F16
     | UNARY_F32
     | UNARY_F64
-    | {'V_TRIG_PREOP_F64', 'V_FMA_F64', 'V_LDEXP_F64'}
+    | {'V_MULLIT_F32', 'V_LDEXP_F64', 'V_TRIG_PREOP_F64', 'V_FMA_F64'}
 )
 
 
@@ -750,6 +753,39 @@ def gen_bit_pack(ctx: ExecuteContext) -> str | None:
         f'  amdgpu::arith::{helper}(wf, {wave_api(api, 32)}, {wave_api(api, 64)},',
         f'      flags, modifiers,',
         f'      {operands});',
+    ]
+    return '\n'.join(lines)
+
+
+def gen_cube(ctx: ExecuteContext) -> str | None:
+    arch = ctx.arch_name
+    mnemonic = ctx.inst.name
+    dst = ctx.dst_ops
+    src = ctx.src_ops
+    is_vop3 = ctx.is_vop3
+    if arch not in ('rdna3', 'rdna4') or mnemonic not in CUBE_NAMES or not is_vop3:
+        return None
+    if len(dst) != 1 or len(src) != 3:
+        return None
+    api = 'rj_arith_' + mnemonic.lower() + ('_gfx12' if arch == 'rdna4' else '')
+    lines = [
+        '  uint64_t flags = wf.cu().arithmetic_flags();',
+        '  flags |= uint64_t(wf.fp_round_mode_f32()) << 24;',
+        '  if (wf.ieee_mode()) flags |= RJ_ARITH_FP_IEEE_MODE;',
+    ]
+    if arch == 'rdna3':
+        lines += ['  if (!wf.dx10_clamp()) flags |= RJ_ARITH_FP_DX10_CLAMP_OFF;']
+    lines += [
+        '  const uint64_t modifiers = ((inst_.abs & 1) ? RJ_ARITH_ALU_ABS_A : 0u) |',
+        '      ((inst_.abs & 2) ? RJ_ARITH_ALU_ABS_B : 0u) |',
+        '      ((inst_.abs & 4) ? RJ_ARITH_ALU_ABS_C : 0u) |',
+        '      ((inst_.neg & 1) ? RJ_ARITH_ALU_NEG_A : 0u) |',
+        '      ((inst_.neg & 2) ? RJ_ARITH_ALU_NEG_B : 0u) |',
+        '      ((inst_.neg & 4) ? RJ_ARITH_ALU_NEG_C : 0u) |',
+        '      (uint64_t(inst_.omod) * RJ_ARITH_ALU_OMOD_2) |',
+        '      (inst_.clamp ? RJ_ARITH_ALU_CLAMP : 0u);',
+        f'  amdgpu::arith::execute_ternary32(wf, {wave_api(api, 32)}, {wave_api(api, 64)}, flags, modifiers,',
+        f'      {dst[0]}, {src[0]}, {src[1]}, {src[2]});',
     ]
     return '\n'.join(lines)
 
@@ -1438,3 +1474,34 @@ def gen_float_ternary_selection(ctx: ExecuteContext) -> str | None:
         f'      {dst[0]}, {", ".join(src)}, {str(arch == "rdna3").lower()});',
     ]
     return '\n'.join(lines)
+
+
+def gen_mullit(ctx: ExecuteContext) -> str | None:
+    arch = ctx.arch_name
+    mnemonic = ctx.inst.name
+    dst = ctx.dst_ops
+    src = ctx.src_ops
+    is_vop3 = ctx.is_vop3
+    if arch not in ('rdna3', 'rdna4') or mnemonic != 'V_MULLIT_F32' or not is_vop3:
+        return None
+    if len(dst) != 1 or len(src) != 3:
+        return None
+    api = 'rj_arith_v_mullit_f32' + ('_gfx12' if arch == 'rdna4' else '')
+    terms = []
+    for i, letter in enumerate('ABC'):
+        terms += [
+            f'((inst_.abs & {1 << i}) ? RJ_ARITH_ALU_ABS_{letter} : 0u)',
+            f'((inst_.neg & {1 << i}) ? RJ_ARITH_ALU_NEG_{letter} : 0u)',
+        ]
+    terms += [
+        '(uint64_t(inst_.omod) * RJ_ARITH_ALU_OMOD_2)',
+        '(inst_.clamp ? RJ_ARITH_ALU_CLAMP : 0u)',
+    ]
+    return '\n'.join(
+        [
+            '  const uint64_t modifiers = ' + ' | '.join(terms) + ';',
+            f'  amdgpu::arith::execute_float_ternary32(wf, {wave_api(api, 32)}, {wave_api(api, 64)},',
+            '      wf.cu().arithmetic_flags(), modifiers,',
+            f'      {dst[0]}, {", ".join(src)}, {str(arch == "rdna3").lower()});',
+        ]
+    )
