@@ -5469,7 +5469,9 @@ void expect_arithmetic_case(const ArithmeticCase &test, SimdPathExpectation simd
 
 class ValuFpModeTest : public testing::TestWithParam<ArithmeticCase> {};
 
-TEST_P(ValuFpModeTest, HonorsModeAndPreservesInactiveLanes) { expect_arithmetic_case(GetParam()); }
+TEST_P(ValuFpModeTest, HonorsModeAndPreservesInactiveLanes) {
+  expect_arithmetic_case(GetParam(), {}, /*uses_arith=*/true);
+}
 
 // Restores the module-local force-scalar gate if an assertion leaves the test early.
 struct ForceScalarGuard {
@@ -5524,9 +5526,8 @@ TEST_P(ValuIntegralRoundingModeTest, ModifiersWithSimdEnabledAndForcedScalar) {
   for (const bool scalar : {true, false}) {
     SCOPED_TRACE(scalar ? "scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
-    const bool uses_arith = GetParam().name.find("F64") != std::string::npos;
-    expect_arithmetic_case(GetParam(), simd_expectation_for_run(GetParam(), scalar, uses_arith),
-                           uses_arith);
+    expect_arithmetic_case(GetParam(),
+                           simd_expectation_for_run(GetParam(), scalar, /*uses_arith=*/true), true);
   }
 }
 
@@ -5551,10 +5552,8 @@ TEST_P(ValuCapturedLaneTest, MatchesHardwareWithSimdEnabledAndForcedScalar) {
   for (const bool scalar : {true, false}) {
     SCOPED_TRACE(scalar ? "scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
-    const bool uses_arith = GetParam().name.find("Ldexp") != std::string::npos ||
-                            GetParam().name.find("FractF64") != std::string::npos;
-    expect_arithmetic_case(GetParam(), simd_expectation_for_run(GetParam(), scalar, uses_arith),
-                           uses_arith);
+    expect_arithmetic_case(GetParam(),
+                           simd_expectation_for_run(GetParam(), scalar, /*uses_arith=*/true), true);
   }
 }
 
@@ -5587,7 +5586,7 @@ TEST_P(ValuRoundedResultModifierTest, MatchesGfx1201WithSimdEnabledAndForcedScal
   for (const bool scalar : {true, false}) {
     SCOPED_TRACE(scalar ? "scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
-    expect_arithmetic_case(GetParam());
+    expect_arithmetic_case(GetParam(), {}, /*uses_arith=*/true);
   }
 }
 
@@ -5604,7 +5603,7 @@ TEST_P(ValuDot2Packed16Test, MatchesCapturesWithSimdEnabledAndForcedScalar) {
   for (const bool scalar : {true, false}) {
     SCOPED_TRACE(scalar ? "forced scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
-    expect_arithmetic_case(GetParam());
+    expect_arithmetic_case(GetParam(), {}, /*uses_arith=*/true);
   }
 }
 
@@ -5621,7 +5620,7 @@ TEST_P(ValuDotFamilyTest, MatchesCapturesWithSimdEnabledAndForcedScalar) {
     SCOPED_TRACE(scalar ? "forced scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
     expect_arithmetic_case(GetParam(),
-                           simd_expectation_for_run(GetParam(), scalar, /*uses_arith=*/true));
+                           simd_expectation_for_run(GetParam(), scalar, /*uses_arith=*/true), true);
   }
 }
 
@@ -5787,7 +5786,7 @@ TEST_P(ValuRdna3OmodOverflowTest, MatchesCapturesWithSimdEnabledAndForcedScalar)
   for (const bool scalar : {true, false}) {
     SCOPED_TRACE(scalar ? "scalar" : "SIMD enabled");
     util::set_force_scalar_for_testing(scalar);
-    expect_arithmetic_case(GetParam());
+    expect_arithmetic_case(GetParam(), {}, /*uses_arith=*/true);
   }
 }
 

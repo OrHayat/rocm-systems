@@ -54,11 +54,14 @@ using FloatUnary64Function = int (*)(uint64_t, uint64_t, uint64_t, uint32_t *con
 // lanes contribute fresh causes; rejected calls commit neither results nor state.
 inline void execute_float_unary32(Wavefront &wave, FloatUnary32Function wave32,
                                   FloatUnary64Function wave64, uint64_t flags, uint64_t modifiers,
-                                  const Operand &destination, const Operand &source, bool rdna3) {
+                                  const Operand &destination, const Operand &source, bool rdna3,
+                                  bool guest_rounding = false) {
   const uint64_t exec_mask = wave.exec() & wave.vgpr_write_mask();
   if (!exec_mask)
     return;
-  flags = float32_flags(wave, flags, rdna3) & ~RJ_ARITH_FP_ROUND_MASK;
+  flags = float32_flags(wave, flags, rdna3);
+  if (!guest_rounding)
+    flags &= ~RJ_ARITH_FP_ROUND_MASK;
   RegisterAccess registers(wave);
   VectorInput32 a(registers, wave, source, exec_mask);
   uint32_t causes = 0;
@@ -144,11 +147,14 @@ inline void execute_float_binary64(Wavefront &wave, FloatBinary32Function wave32
 inline void execute_float64_word(Wavefront &wave, FloatBinary32Function wave32,
                                  FloatBinary64Function wave64, uint64_t flags, uint64_t modifiers,
                                  const Operand &destination, const Operand &source,
-                                 const Operand &integer, bool rdna3) {
+                                 const Operand &integer, bool rdna3, bool ldexp) {
   const uint64_t exec_mask = wave.exec() & wave.vgpr_write_mask();
   if (!exec_mask)
     return;
   flags = float64_flags(wave, flags, rdna3);
+  // TRIG_PREOP uses a fixed table policy; LDEXP rounds and clamps by MODE.
+  if (!ldexp)
+    flags &= ~(RJ_ARITH_FP_ROUND_MASK | RJ_ARITH_FP_DX10_CLAMP_OFF);
   RegisterAccess registers(wave);
   VectorInput64 a(registers, wave, source, exec_mask);
   VectorInput32 b(registers, wave, integer, exec_mask);
@@ -419,16 +425,19 @@ inline uint64_t float16_flags(const Wavefront &wave, uint64_t flags, bool rdna3)
   return flags;
 }
 
-// Extract the FP16 exponent, independent of guest arithmetic rounding.
+// Fixed-rounding cores can still use guest rounding for FRACT or output scaling.
 // Routed VOP1 halves and explicit VOP3 selectors both
 // preserve the destination's other half, including when source and destination alias.
 inline void execute_float_unary16(Wavefront &wave, FloatUnary32Function wave32,
                                   FloatUnary64Function wave64, uint64_t flags, uint64_t modifiers,
-                                  const Operand &destination, const Operand &source, bool rdna3) {
+                                  const Operand &destination, const Operand &source, bool rdna3,
+                                  bool guest_rounding = false) {
   const uint64_t exec_mask = wave.exec() & wave.vgpr_write_mask();
   if (!exec_mask)
     return;
-  flags = float16_flags(wave, flags, rdna3) & ~RJ_ARITH_FP_ROUND_MASK;
+  flags = float16_flags(wave, flags, rdna3);
+  if (!guest_rounding)
+    flags &= ~RJ_ARITH_FP_ROUND_MASK;
   RegisterAccess registers(wave);
   VectorInput32 a(registers, wave, source, exec_mask, modifiers & RJ_ARITH_ALU_HIGH_A ? 0xC : 0x3);
   uint32_t causes = 0;
