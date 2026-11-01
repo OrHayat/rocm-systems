@@ -5,6 +5,7 @@
 ### Added
 
 * Added a Host backend that enables file I/O using host memory. `hipFileBufRegister` now accepts host memory.
+* `hipFileHandleRegister` now accepts `hipFileHandleTypeUserspaceFS`, as cuFile does: the handle is the filesystem's own (a file descriptor or a pointer), which hipFile doesn't inspect. Synchronous and batch I/O on such a file call the `read` and `write` callbacks in its `hipFileFSOps_t`, which receive that handle, so a userspace filesystem can move the data itself, for example by RDMA to and from GPU memory. Asynchronous I/O on such a file isn't supported yet.
 
 ### Changed
 
