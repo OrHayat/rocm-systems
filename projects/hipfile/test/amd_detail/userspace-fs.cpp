@@ -215,10 +215,9 @@ struct UserspaceFsAsyncTest : public UserspaceFsTest, public WithParamInterface<
         EXPECT_CALL(*mstream, getLock);
         EXPECT_CALL(*mstream, getHipStream).Times(AnyNumber());
         EXPECT_CALL(mmonitor, addOp).WillOnce(SaveArg<0>(&op));
-        EXPECT_CALL(mhip, hipLaunchHostFunc)
-            .Times(2)
-            .WillRepeatedly(
-                [this](hipStream_t, hipHostFn_t fn, void *arg) { host_fns.emplace_back(fn, arg); });
+        EXPECT_CALL(mhip, hipLaunchHostFunc).WillOnce([this](hipStream_t, hipHostFn_t fn, void *arg) {
+            host_fns.emplace_back(fn, arg);
+        });
     }
 
     void enqueue()
@@ -239,8 +238,8 @@ TEST_P(UserspaceFsAsyncTest, IoRunsOnAWorkerWhenTheStreamReachesIt)
 {
     expectEnqueue();
     enqueue();
-    ASSERT_EQ(host_fns.size(), 2u);
-    ASSERT_EQ(host_fns[1].first, &async_io_cleanup);
+    ASSERT_EQ(host_fns.size(), 1u);
+    ASSERT_NE(host_fns[0].first, &async_io_cleanup);
     ASSERT_EQ(last_call.handle, nullptr);
     ASSERT_EQ(nbytes, 0);
 

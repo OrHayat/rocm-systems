@@ -100,6 +100,8 @@ userspace_fs_async_io(void *userargs)
     catch (...) {
         op->bytes_transferred_internal = -hipFileInternalError;
     }
+    // The IO is never split, so it publishes its result here rather than in a host function of its own.
+    async_io_cleanup(op);
 }
 }
 
@@ -157,7 +159,6 @@ UserspaceFs::enqueueAsyncIo(IoType type, std::shared_ptr<IFile> file, std::share
     try {
         auto stream_lock = stream->getLock();
         Context<Hip>::get()->hipLaunchHostFunc(stream->getHipStream(), userspace_fs_async_io, op.get());
-        Context<Hip>::get()->hipLaunchHostFunc(stream->getHipStream(), async_io_cleanup, op.get());
     }
     catch (...) {
         // If something threw, still try to enqueue cleanup function
