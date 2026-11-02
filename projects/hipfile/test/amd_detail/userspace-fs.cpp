@@ -3,13 +3,18 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "async.h"
 #include "backend.h"
 #include "backend/userspace-fs.h"
+#include "hip.h"
 #include "hipfile.h"
 #include "hipfile-warnings.h"
 #include "io.h"
+#include "masyncmonitor.h"
 #include "mbuffer.h"
 #include "mfile.h"
+#include "mhip.h"
+#include "mstream.h"
 
 #include <array>
 #include <cerrno>
@@ -20,6 +25,9 @@
 #include <memory>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
+#include <utility>
+#include <vector>
 
 using namespace hipFile;
 using namespace testing;
@@ -40,13 +48,15 @@ struct FsCall {
     bool               write;
 };
 
-FsCall  last_call{};
-ssize_t next_result{0};
+FsCall          last_call{};
+ssize_t         next_result{0};
+std::thread::id fs_thread{};
 
 ssize_t
 fsRead(void *handle, char *buf, size_t size, hoff_t offset, hipFileRDMAInfo_t *rdma_info)
 {
     last_call = {handle, buf, size, offset, rdma_info, false};
+    fs_thread = std::this_thread::get_id();
     return next_result;
 }
 
@@ -54,6 +64,7 @@ ssize_t
 fsWrite(void *handle, const char *buf, size_t size, hoff_t offset, hipFileRDMAInfo_t *rdma_info)
 {
     last_call = {handle, buf, size, offset, rdma_info, true};
+    fs_thread = std::this_thread::get_id();
     return next_result;
 }
 
@@ -172,18 +183,165 @@ TEST_F(UserspaceFsTest, IoRejectedWithoutBothCallbacks)
                  BackendDisabled);
 }
 
-TEST_F(UserspaceFsTest, AsyncIoIsNotSupported)
-{
-    size_t  size{io_size};
-    hoff_t  foff{file_offset};
-    hoff_t  boff{buffer_offset};
-    ssize_t nbytes{0};
+// The stream is mocked: host functions are recorded at enqueue and run by runStream().
+struct UserspaceFsAsyncTest : public UserspaceFsTest, public WithParamInterface<IoType> {
+    StrictMock<MHip>                  mhip;
+    StrictMock<MAsyncMonitor>         mmonitor;
+    shared_ptr<StrictMock<MStream>>   mstream{make_shared<StrictMock<MStream>>()};
+    shared_ptr<AsyncOp>               op;
+    vector<pair<hipHostFn_t, void *>> host_fns;
+    size_t                            size{io_size};
+    hoff_t                            foff{file_offset};
+    hoff_t                            boff{buffer_offset};
+    ssize_t                           nbytes{-99};
 
-    ASSERT_THROW(UserspaceFs().async_io(IoType::Read, mfile, mbuffer, &size, &foff, &boff, &nbytes, nullptr),
-                 std::runtime_error);
-    ASSERT_THROW(UserspaceFs().enqueueAsyncIo(IoType::Read, mfile, mbuffer, &size, &foff, &boff, &nbytes,
-                                              nullptr, nullptr),
-                 std::runtime_error);
+    void SetUp() override
+    {
+        last_call   = {};
+        next_result = static_cast<ssize_t>(io_size);
+        expectIo(&fs_ops);
+        fixed(false);
+    }
+
+    void fixed(bool params_fixed)
+    {
+        EXPECT_CALL(*mstream, fixedIOSize).WillRepeatedly(Return(params_fixed));
+        EXPECT_CALL(*mstream, fixedFileOffset).WillRepeatedly(Return(params_fixed));
+        EXPECT_CALL(*mstream, fixedBufferOffset).WillRepeatedly(Return(params_fixed));
+    }
+
+    void expectEnqueue()
+    {
+        EXPECT_CALL(*mstream, getLock);
+        EXPECT_CALL(*mstream, getHipStream).Times(AnyNumber());
+        EXPECT_CALL(mmonitor, addOp).WillOnce(SaveArg<0>(&op));
+        EXPECT_CALL(mhip, hipLaunchHostFunc)
+            .Times(2)
+            .WillRepeatedly(
+                [this](hipStream_t, hipHostFn_t fn, void *arg) { host_fns.emplace_back(fn, arg); });
+    }
+
+    void enqueue()
+    {
+        UserspaceFs().async_io(GetParam(), mfile, mbuffer, &size, &foff, &boff, &nbytes, mstream);
+    }
+
+    void runStream()
+    {
+        EXPECT_CALL(mmonitor, completeOp(op.get()));
+        for (auto [fn, arg] : host_fns) {
+            fn(arg);
+        }
+    }
+};
+
+TEST_P(UserspaceFsAsyncTest, IoRunsOnAWorkerWhenTheStreamReachesIt)
+{
+    expectEnqueue();
+    enqueue();
+    ASSERT_EQ(host_fns.size(), 2u);
+    ASSERT_EQ(host_fns[1].first, &async_io_cleanup);
+    ASSERT_EQ(last_call.handle, nullptr);
+    ASSERT_EQ(nbytes, 0);
+
+    runStream();
+    ASSERT_EQ(last_call.handle, &fs_file);
+    ASSERT_EQ(last_call.buf, data.data() + buffer_offset);
+    ASSERT_EQ(last_call.size, io_size);
+    ASSERT_EQ(last_call.offset, file_offset);
+    ASSERT_EQ(last_call.rdma_info, nullptr);
+    ASSERT_EQ(last_call.write, GetParam() == IoType::Write);
+    ASSERT_NE(fs_thread, std::this_thread::get_id());
+    ASSERT_EQ(nbytes, static_cast<ssize_t>(io_size));
 }
+
+TEST_P(UserspaceFsAsyncTest, UnfixedParametersAreReadWhenTheStreamReachesIt)
+{
+    expectEnqueue();
+    enqueue();
+    size        = 512;
+    foff        = 8192;
+    boff        = 0;
+    next_result = 512;
+
+    runStream();
+    ASSERT_EQ(last_call.buf, data.data());
+    ASSERT_EQ(last_call.size, 512u);
+    ASSERT_EQ(last_call.offset, 8192);
+    ASSERT_EQ(nbytes, 512);
+}
+
+TEST_P(UserspaceFsAsyncTest, FixedParametersAreReadAtEnqueue)
+{
+    fixed(true);
+    expectEnqueue();
+    enqueue();
+    size = 512;
+    foff = 8192;
+    boff = 0;
+
+    runStream();
+    ASSERT_EQ(last_call.buf, data.data() + buffer_offset);
+    ASSERT_EQ(last_call.size, io_size);
+    ASSERT_EQ(last_call.offset, file_offset);
+}
+
+TEST_P(UserspaceFsAsyncTest, FilesystemErrorReportsFailure)
+{
+    next_result = -EIO;
+    expectEnqueue();
+    enqueue();
+
+    runStream();
+    ASSERT_EQ(nbytes, -1);
+}
+
+TEST_P(UserspaceFsAsyncTest, RegionOverrunWhenTheStreamReachesItIsInvalidValue)
+{
+    expectEnqueue();
+    enqueue();
+    size = data.size();
+
+    runStream();
+    ASSERT_EQ(last_call.handle, nullptr);
+    ASSERT_EQ(nbytes, -hipFileInvalidValue);
+}
+
+TEST_P(UserspaceFsAsyncTest, InvalidRegionAtEnqueueThrows)
+{
+    boff = static_cast<hoff_t>(data.size());
+    ASSERT_THROW(enqueue(), std::invalid_argument);
+}
+
+TEST_P(UserspaceFsAsyncTest, ZeroSizeEnqueuesNothing)
+{
+    size = 0;
+    enqueue();
+    ASSERT_EQ(nbytes, 0);
+}
+
+TEST_P(UserspaceFsAsyncTest, FailedEnqueueStillEnqueuesCleanup)
+{
+    EXPECT_CALL(*mstream, getLock);
+    EXPECT_CALL(*mstream, getHipStream).Times(AnyNumber());
+    EXPECT_CALL(mmonitor, addOp).WillOnce(SaveArg<0>(&op));
+    EXPECT_CALL(mhip, hipLaunchHostFunc)
+        .WillOnce(Throw(Hip::RuntimeError(hipErrorInvalidHandle)))
+        .WillOnce([this](hipStream_t, hipHostFn_t fn, void *arg) { host_fns.emplace_back(fn, arg); });
+
+    ASSERT_THROW(enqueue(), Hip::RuntimeError);
+    ASSERT_EQ(host_fns.size(), 1u);
+    ASSERT_EQ(host_fns[0].first, &async_io_cleanup);
+    runStream();
+    ASSERT_EQ(last_call.handle, nullptr);
+}
+
+TEST_P(UserspaceFsAsyncTest, WithoutBothCallbacksThrows)
+{
+    expectIo(&read_only_ops);
+    ASSERT_THROW(enqueue(), BackendDisabled);
+}
+
+INSTANTIATE_TEST_SUITE_P(UserspaceFsAsync, UserspaceFsAsyncTest, Values(IoType::Read, IoType::Write));
 
 HIPFILE_WARN_NO_GLOBAL_CTOR_ON

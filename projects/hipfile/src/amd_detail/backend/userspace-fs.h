@@ -36,17 +36,19 @@ public:
     int score(const std::shared_ptr<IFile> &file, const std::shared_ptr<IBuffer> &buffer, size_t size,
               hoff_t file_offset, hoff_t buffer_offset) const override;
 
-    /// @brief Not supported: async IO on a userspace filesystem file fails
-    [[noreturn]] void async_io(IoType type, std::shared_ptr<IFile> file, std::shared_ptr<IBuffer> buffer,
-                               size_t *size_p, hoff_t *file_offset_p, hoff_t *buffer_offset_p,
-                               ssize_t *bytes_transferred_p, std::shared_ptr<IStream> stream) override;
+    void async_io(IoType type, std::shared_ptr<IFile> file, std::shared_ptr<IBuffer> buffer, size_t *size_p,
+                  hoff_t *file_offset_p, hoff_t *buffer_offset_p, ssize_t *bytes_transferred_p,
+                  std::shared_ptr<IStream> stream) override;
 
-    /// @brief Not supported: async IO on a userspace filesystem file fails
-    [[noreturn]] void enqueueAsyncIo(IoType type, std::shared_ptr<IFile> file,
-                                     std::shared_ptr<IBuffer> buffer, size_t *size_p, hoff_t *file_offset_p,
-                                     hoff_t *buffer_offset_p, ssize_t *bytes_transferred_p,
-                                     std::shared_ptr<IStream>            stream,
-                                     std::shared_ptr<AsyncFailoverState> failover) override;
+    /// @brief Enqueue a host function that holds the stream while the filesystem's callback runs
+    ///
+    /// The callback runs on a thread pool worker rather than in the host function, because a
+    /// filesystem may make HIP calls (for example to look up the buffer), which a host function must
+    /// not do. No other backend can serve the file, so @p failover is unused.
+    void enqueueAsyncIo(IoType type, std::shared_ptr<IFile> file, std::shared_ptr<IBuffer> buffer,
+                        size_t *size_p, hoff_t *file_offset_p, hoff_t *buffer_offset_p,
+                        ssize_t *bytes_transferred_p, std::shared_ptr<IStream> stream,
+                        std::shared_ptr<AsyncFailoverState> failover) override;
 
 protected:
     ssize_t _io_impl(IoType type, std::shared_ptr<IFile> file, std::shared_ptr<IBuffer> buffer, size_t size,
